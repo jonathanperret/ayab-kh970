@@ -34,7 +34,6 @@ uint8_t spiTransfer(uint8_t val) {
   return received;
 }
 
-// the setup function runs once when you press reset or power the board
 void setup() {
   pinMode(CS, INPUT_PULLUP);
   pinMode(MOSI, OUTPUT);
@@ -86,7 +85,6 @@ bool check(uint8_t actual, uint8_t expected) {
 
 uint8_t sendOut(uint8_t mosiVal) {
   // return spiTransfer(mosiVal);
-  // Serial.print("< 0x"); Serial.print(mosiVal, 16);
   uint8_t misoVal = 0;
   low(MOSI);
   low(SCK);
@@ -107,7 +105,6 @@ uint8_t sendOut(uint8_t mosiVal) {
   }
   delayMicroseconds(10);
   low(MOSI);
-  // Serial.print(" > 0x"); Serial.println(misoVal, 16);
   return misoVal;
 }
 
@@ -161,7 +158,7 @@ uint8_t exchange(uint8_t cb1Val) {
     ready();
   }
   wait_falling(CS);
-  ack = sendOut(MSG_END); //0x87); // bed doesn't care
+  ack = sendOut(MSG_END); // bed doesn't care
   if (!check(ack, cb1Val))
     return;
   ready();
@@ -225,9 +222,4 @@ void loop() {
   dump_history();
 
   delay(3000);
-
-  // digitalWrite(LED_BUILTIN, HIGH);  // turn the LED on (HIGH is the voltage level)
-  // delay(1000);                      // wait for a second
-  // digitalWrite(LED_BUILTIN, LOW);   // turn the LED off by making the voltage LOW
-  // delay(1000);                      // wait for a second
 }
