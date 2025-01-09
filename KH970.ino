@@ -138,14 +138,16 @@ uint8_t exchange(uint8_t cb1Val) {
     return;
   ready();
 
+  prevVal = MSG_BED_BEGIN;
+
   if (bedVal == MSG_BED_PATTERN) {
     cb1Val = 0xaa;
     record(cb1Val);
     for(int i=0; i<25; i++) {
       wait_falling(CS);
       ack = sendOut(cb1Val);
-      // if (!check(ack, prevVal))
-      //   return;
+      if (!check(ack, prevVal))
+        return;
       prevVal = cb1Val;
       ready();
     }
@@ -153,7 +155,7 @@ uint8_t exchange(uint8_t cb1Val) {
     record(cb1Val);
     wait_falling(CS);
     ack = sendOut(cb1Val);
-    if (ack != 0x87 && !check(ack, MSG_BED_BEGIN)) // weird, there's exactly one point where the bed sends 0x87 as a dummy here
+    if (ack != 0x87 && !check(ack, prevVal)) // weird, there's exactly one point where the bed sends 0x87 as a dummy here
       return;
     prevVal = cb1Val;
     ready();
