@@ -176,7 +176,7 @@ void boot() {
   delay(18);
   high(MOSI);
 
-#if 0
+#if 1
   exchange(0x07);
   exchange(0x07);
   exchange(0x07);
