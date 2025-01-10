@@ -4,11 +4,15 @@ SPISettings spiSettings(125000, LSBFIRST, SPI_MODE1);
 
 const int CS = 10;
 
-uint8_t history[1024];
+uint8_t history[256];
 int history_len = 0;
 
+uint8_t pattern[25];
+int pattern_row = 0;
+
 inline void record(uint8_t b) {
-  history[history_len++] = b;
+  history[history_len] = b;
+  history_len = (history_len + 1)%sizeof(history);
 }
 
 void clear_history() {
@@ -138,9 +142,9 @@ uint8_t exchange(uint8_t cb1Val) {
   prevVal = MSG_BED_BEGIN;
 
   if (bedVal == MSG_BED_PATTERN) {
-    cb1Val = 0xaa;
-    record(cb1Val);
+    record(0xaa);
     for(int i=0; i<25; i++) {
+      cb1Val = pattern[i];
       wait_falling(CS);
       ack = sendOut(cb1Val);
       if (!check(ack, prevVal))
@@ -211,11 +215,19 @@ void loop() {
 
   clear_history();
 
-  for(int i=0;i<20;i++) {
-    uint8_t bedVal = exchange(i < 100 ? 0x8b : 0x6b);
-    if (bedVal == 0x85 && 0) {
+  for(int i=0;i<25;i++) {
+    pattern[i] = 0xaa;
+  }
+
+  while(true) {
+    uint8_t bedVal = exchange(0x8b);
+    if (bedVal == 0x85) {
       exchange(0x00);
       exchange(0x07);
+      pattern_row++;
+      for(int i=0;i<25;i++) {
+        pattern[i] = pattern_row & 1 ? 0x55 : 0xaa;
+      }
     }
   }
 
