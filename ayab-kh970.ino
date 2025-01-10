@@ -215,9 +215,7 @@ void loop() {
 
   clear_history();
 
-  for(int i=0;i<25;i++) {
-    pattern[i] = 0xaa;
-  }
+  memset(pattern, 0, sizeof(pattern));
 
   while(true) {
     uint8_t bedVal = exchange(0x8b);
@@ -226,7 +224,7 @@ void loop() {
       exchange(0x07);
       pattern_row++;
       for(int i=0;i<25;i++) {
-        pattern[i] = pattern_row & 1 ? 0x55 : 0xaa;
+        pattern[i] = (i >= 8 && i <16) ? (pattern_row & 1 ? 0x55 : 0xaa) : 0x01;
       }
     }
   }
