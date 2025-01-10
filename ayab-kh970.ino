@@ -2,7 +2,7 @@
 
 SPISettings spiSettings(125000, LSBFIRST, SPI_MODE1);
 
-const int CS = 10;
+const int CS = 9;
 
 uint8_t history[256];
 int history_len = 0;
@@ -224,7 +224,7 @@ void loop() {
       exchange(0x07);
       pattern_row++;
       for(int i=0;i<25;i++) {
-        pattern[i] = (i >= 8 && i <16) ? (pattern_row & 1 ? 0x55 : 0xaa) : 0x01;
+        pattern[i] = i < 12 ? 0xff : 0x00; //(i >= 8 && i <16) ? (pattern_row & 1 ? 0x55 : 0xaa) : 0x00; //pattern_row; // ((i ^ pattern_row) & 1) ? 0xff : 0x00;// (i >= 8 && i <16) ? (pattern_row & 1 ? 0x55 : 0xaa) : 0x01;
       }
     }
   }
