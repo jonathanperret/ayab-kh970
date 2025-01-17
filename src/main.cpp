@@ -1,3 +1,5 @@
+#include <Arduino.h>
+
 #if defined(ARDUINO_ARCH_RP2040)
 #define KH_MOSI 7
 #define KH_MISO 8
