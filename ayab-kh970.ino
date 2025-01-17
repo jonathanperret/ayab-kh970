@@ -1,63 +1,104 @@
-#include <SPI.h>
+#if defined(ARDUINO_ARCH_RP2040)
+#define KH_MOSI 7
+#define KH_MISO 8
+#define KH_SCK 6
+#define KH_CS 9
+#else
+#define KH_MOSI MOSI
+#define KH_MISO MISO
+#define KH_SCK SCK
+#define KH_CS 9
+#endif
 
-SPISettings spiSettings(125000, LSBFIRST, SPI_MODE1);
-
-const int CS = 9;
-
-uint8_t history[256];
-int history_len = 0;
+#define MSG_BEGIN 0x47
+#define MSG_END 0x87
 
 uint8_t pattern[25];
 int pattern_row = 0;
 
-inline void record(uint8_t b) {
-  history[history_len] = b;
-  history_len = (history_len + 1)%sizeof(history);
-}
-
-void clear_history() {
-  history_len = 0;
-}
-
-void dump_history() {
-  for (int i=0; i<history_len; i++) {
-    Serial.print(i & 1 ? '<' : '>');
-    Serial.print(" 0x");
-    Serial.print(history[i], 16);
-    Serial.print(' ');
+void update_pattern(int row) {
+  memset(pattern, 0, sizeof(pattern));
+  for (int i = 0; i < 25; i++) {
+    pattern[i] = ((row % 16 < 8) ^ (i & 1)) ? 0xff : 0x00;
   }
-  Serial.println();
 }
 
-uint8_t spiTransfer(uint8_t val) {
-  SPI.begin();
-  SPI.beginTransaction(spiSettings);
-  uint8_t received = SPI.transfer(0x47);
-  SPI.endTransaction();
-  SPI.end();
-  return received;
-}
+#define CLOCK_PERIOD 100
 
-void setup() {
-  pinMode(CS, INPUT_PULLUP);
-  pinMode(MOSI, OUTPUT);
-  pinMode(SCK, OUTPUT);
-  Serial.begin(115200);
-}
+struct CSI {
+  uint8_t outByte, inByte;
+  uint8_t bitIndex;
 
-void softhigh(int pin) {
-  pinMode(pin, INPUT_PULLUP);
-}
+  enum State {
+    STATE_IDLE,
+    STATE_START,
+    STATE_TRANSFER,
+    STATE_FINISH,
+    STATE_WAIT_CS_UP,
+  };
 
-void low(int pin) {
-  digitalWrite(pin, LOW);
-  //pinMode(pin, OUTPUT);
-}
+  State state;
+  unsigned long delayStartMicros;
 
-void high(int pin) {
-  digitalWrite(pin, HIGH);
-  //pinMode(pin, OUTPUT);
-}
+  void begin() {
+    state = STATE_IDLE;
+    digitalWrite(KH_SCK, LOW);
+  }
+
+  bool update() {
+    if (state == STATE_START) {
+      if (digitalRead(KH_CS) == HIGH) {
+        return true;
+      }
+      digitalWrite(KH_MOSI, LOW);
+      digitalWrite(KH_SCK, LOW);
+      delayStartMicros = micros();
+      state = STATE_TRANSFER;
+    } else if (state == STATE_TRANSFER) {
+      if (micros() - delayStartMicros < CLOCK_PERIOD / 2) {
+        return true;
+      }
+      delayStartMicros = micros();
+      if ((bitIndex & 1) == 0) {
+        if (outByte & 1)
+          digitalWrite(KH_MOSI, HIGH);
+        else
+          digitalWrite(KH_MOSI, LOW);
+        outByte >>= 1;
+        digitalWrite(KH_SCK, HIGH);
+      } else {
+        inByte >>= 1;
+        if (digitalRead(KH_MISO) == LOW) {
+          inByte |= 0x80;
+        }
+        digitalWrite(KH_SCK, LOW);
+      }
+      bitIndex++;
+      if (bitIndex >= 16) {
+        state = STATE_FINISH;
+      }
+    } else if (state == STATE_FINISH) {
+      delayMicroseconds(1);
+      digitalWrite(KH_MOSI, LOW);
+      state = STATE_WAIT_CS_UP;
+    } else {
+      if (digitalRead(KH_CS) == HIGH) {
+        state = STATE_IDLE;
+      }
+    }
+    return state != STATE_IDLE;
+  }
+
+  void sendOut(uint8_t mosiVal) {
+    inByte = 0;
+    outByte = mosiVal;
+    bitIndex = 0;
+    digitalWrite(KH_MOSI, HIGH);
+    state = STATE_START;
+  }
+};
+
+CSI csi;
 
 void wait_falling(int pin) {
   int prevVal = digitalRead(pin);
@@ -70,166 +111,218 @@ void wait_falling(int pin) {
   }
 }
 
+void force_reboot() {
+  // By signaling readiness but not responding, the CB1 forces the bed to reboot
+  digitalWrite(KH_MOSI, HIGH);
+  delay(3000);
+}
 
 bool check(uint8_t actual, uint8_t expected) {
   if (actual != expected) {
     Serial.print("BAD ACK !!! expected=0x");
     Serial.print(expected, 16);
     Serial.print(" actual=0x");
-    Serial.print(actual, 16);
-    dump_history();
-    clear_history();
-    ready();
+    Serial.println(actual, 16);
+    TXLED1;
+    RXLED1;
+    force_reboot();
     return false;
   }
   return true;
 }
 
-#define CLOCK_PERIOD 100
+uint8_t defaultCb1Val = 0x8b;
 
-uint8_t sendOut(uint8_t mosiVal) {
-  // return spiTransfer(mosiVal);
-  uint8_t misoVal = 0;
-  low(MOSI);
-  low(SCK);
-  for(int i=0;i<8;i++){
-    delayMicroseconds(CLOCK_PERIOD/2);
-    if (mosiVal & 1)
-      high(MOSI);
-    else
-      low(MOSI);
-    mosiVal >>= 1;
-    high(SCK);
-    delayMicroseconds(CLOCK_PERIOD/2);
-    misoVal >>= 1;
-    if (digitalRead(MISO) == LOW) {
-      misoVal |= 0x80;
-    }
-    low(SCK);
+bool booted = false;
+
+struct KH970Client {
+
+  uint8_t outBytes[32];
+  uint8_t bytesToSend;
+  uint8_t expectedByte, lastSent;
+  uint8_t bedVal;
+  unsigned long delayStartMillis;
+
+  // artificial delay to distinguish exchanges in a logic analyzer trace
+  const int DEBUG_DELAY_MS = 5;
+
+  enum State {
+    STATE_INIT,
+    STATE_INIT_ACK,
+    STATE_INIT_ACK_DONE,
+    STATE_REPLY,
+    STATE_END,
+    STATE_END_ACK,
+    STATE_END_DELAY,
+  };
+
+  State state;
+
+  KH970Client() {
+    bytesToSend = 0;
+    state = STATE_INIT;
   }
-  delayMicroseconds(10);
-  low(MOSI);
-  return misoVal;
-}
 
-void ready() {
- //delayMicroseconds(1000);
- //delay(10);
- high(MOSI);
-}
+  void append(uint8_t val) {
+    outBytes[bytesToSend++] = val;
+  }
 
-#define MSG_BEGIN   0x47
-#define MSG_END     0x87
-#define MSG_ECHO_MASK 0xff
-
-#define MSG_BED_BEGIN   0x47
-#define MSG_BED_PATTERN 0x85
-
-uint8_t exchange(uint8_t cb1Val) {
-  wait_falling(CS);
-
-  uint8_t bedVal = sendOut(MSG_BEGIN);
-  ready();
-  wait_falling(CS);
-  record(bedVal);
-  // ack
-  uint8_t prevVal = MSG_ECHO_MASK & bedVal; // bed doesn't care
-  uint8_t ack = sendOut(prevVal);
-  if (!check(ack, MSG_BEGIN))
-    return;
-  ready();
-
-  prevVal = MSG_BED_BEGIN;
-
-  if (bedVal == MSG_BED_PATTERN) {
-    record(0xaa);
-    for(int i=0; i<25; i++) {
-      cb1Val = pattern[i];
-      wait_falling(CS);
-      ack = sendOut(cb1Val);
-      if (!check(ack, prevVal))
+  void update() {
+    if (csi.update()) return;
+    if (state == STATE_INIT) {
+      RXLED1;
+      csi.sendOut(MSG_BEGIN);
+      state = STATE_INIT_ACK;
+    } else if (state == STATE_INIT_ACK) {
+      bedVal = csi.inByte;
+      csi.sendOut(bedVal);
+      state = STATE_INIT_ACK_DONE;
+    } else if (state == STATE_INIT_ACK_DONE) {
+      if (!check(csi.inByte, MSG_BEGIN))
         return;
-      prevVal = cb1Val;
-      ready();
-    }
-  } else {
-    record(cb1Val);
-    wait_falling(CS);
-    ack = sendOut(cb1Val);
-    if (ack != 0x87 && !check(ack, prevVal)) // weird, there's exactly one point where the bed sends 0x87 as a dummy here
-      return;
-    prevVal = cb1Val;
-    ready();
-  }
-  wait_falling(CS);
-  ack = sendOut(MSG_END); // bed doesn't care
-  if (!check(ack, cb1Val))
-    return;
-  ready();
-  return bedVal;
-}
 
-void boot() {
-  low(MOSI);
-  delay(18);
-  low(SCK);
-  while(digitalRead(MISO) == HIGH);
-  delay(18);
-  high(MOSI);
-
-#if 1
-  exchange(0x07);
-  exchange(0x07);
-  exchange(0x07);
-  exchange(0x07);
-  exchange(0x07);
-  exchange(0x50);
-  exchange(0x30);
-  exchange(0x00);
-  exchange(0x00);
-  exchange(0x0B);
-#else
-  for(int i=0; i<10; i++) {
-    exchange(MSG_BEGIN);
-  }
-#endif
-  low(MOSI);
-
-  dump_history();
-}
-
-void loop() {
-  Serial.println("Starting...");
-  clear_history();
-  low(SCK);
-  low(MOSI);
-  delay(1000);
-  high(MOSI);
-  delay(1000);
-
-  boot();
-
-//  delay(1000);
-
-  high(MOSI);
-
-  clear_history();
-
-  memset(pattern, 0, sizeof(pattern));
-
-  while(true) {
-    uint8_t bedVal = exchange(0x8b);
-    if (bedVal == 0x85) {
-      exchange(0x00);
-      exchange(0x07);
-      pattern_row++;
-      for(int i=0;i<25;i++) {
-        pattern[i] = i < 12 ? 0xff : 0x00; //(i >= 8 && i <16) ? (pattern_row & 1 ? 0x55 : 0xaa) : 0x00; //pattern_row; // ((i ^ pattern_row) & 1) ? 0xff : 0x00;// (i >= 8 && i <16) ? (pattern_row & 1 ? 0x55 : 0xaa) : 0x01;
+      process(bedVal);
+      expectedByte = MSG_BEGIN;
+      csi.sendOut(lastSent = outBytes[bytesToSend - 1]);
+      state = STATE_REPLY;
+    } else if (state == STATE_REPLY) {
+      if (!check(csi.inByte, expectedByte))
+        return;
+      expectedByte = lastSent;
+      bytesToSend--;
+      if (bytesToSend > 0) {
+        csi.sendOut(lastSent = outBytes[bytesToSend - 1]);
+      } else {
+        csi.sendOut(MSG_END);
+        state = STATE_END_ACK;
+      }
+    } else if (state == STATE_END_ACK) {
+      if (!check(csi.inByte, expectedByte))
+        return;
+      RXLED0;
+      delayStartMillis = millis();
+      state = DEBUG_DELAY_MS > 0 ? STATE_END_DELAY : STATE_INIT;
+    } else if (state == STATE_END_DELAY) {
+      if (millis() - delayStartMillis > DEBUG_DELAY_MS) {
+        state = STATE_INIT;
       }
     }
   }
 
-  dump_history();
+  void process(uint8_t bedVal) {
+    switch (bedVal) {
+      case 0x01:
+        // The "ping" message from the bed?
+        // Sent very often.
+        if (booted) {
+          append(0x8b);
+        } else {
+          // At the end of the boot sequence there's a 0x01 from the bed, but
+          // the CB1 replies with 0B instead of the usual 6B.
+          append(0x0b);
+          booted = true;
+        }
+        break;
 
-  delay(3000);
+      // 80 D8 14 3C 02 are the initial bytes sent by the bed upon boot.
+      // The CB1 appears to always acknowledge them with 07.
+      // Could contain bed firmware version?
+      case 0x80:  // Boot 1
+      case 0xD8:  // Boot 2
+      case 0x14:  // Boot 3
+      case 0x3C:  // Boot 4
+      case 0x02:  // Boot 5
+        append(0x07);
+        break;
+
+      // 0A 8A 4A CA are sent in sequence during the boot, and the CB1
+      // seems to reply with some information. CB1 version number?
+      case 0x0a:  // Boot 6
+        append(0x50);
+        break;
+
+      case 0x8a:  // Boot 7
+        append(0x30);
+        break;
+
+      case 0x4a:  // Boot 8
+        append(0x00);
+        break;
+
+      case 0xca:  // Boot 9
+        append(0x00);
+        break;
+
+      case 0x0d:  // Sent (once) when carriage changes direction after crossing the center; will be followed by pattern request (85)
+      case 0x4d:  // Sent when the row counter is hit
+      case 0x8d:  // Sent when the bed center is crossed
+
+        // We get 2D 6D 7D 13 D3 when the K carriage crosses the left button.
+        // We get CD 6D BD 03 C3 when the K carriage crosses the right button.
+
+      case 0x2d:  // Sent when the left button is passed going to the right
+      case 0x7d:  // Sent after 2D 6D/2D/1D, and after 0D 85 89 if new direction is rightwards.
+      case 0x13:  // Sent after 2D 6D/2D/1D 7D
+      case 0xd3:  // Sent after 2D 6D/2D/1D 7D 13
+
+      case 0xcd:  // Sent when the right button is passed going to the left
+      case 0xbd:  // Sent after CD 6D/2D/1D, and after CD 85 89 if new direction is leftwards.
+      case 0x03:  // Sent after CD 6D/2D/1D BD
+      case 0x43:  // Sent instead of 03 after CD 6D/2D/1D BD, sometimes, seen only with L carriage so far
+      case 0xc3:  // Sent after CD 6D/2D/1D BD 03
+
+      case 0x6d:  // Sent after 2D/CD if the carriage is the K carriage
+      case 0xed:  // Sent after 2D/CD if the carriage is the L carriage
+      case 0x1d:  // Sent after 2D/CD if the carriage is the G carriage
+
+      case 0x3d:  // Sent just before requesting the first row's pattern data
+
+      // 81 5D 49 DD are sent after the first two rows' data has been received
+      case 0x81:
+      case 0x5d:
+      case 0x49:
+      case 0xdd:
+        // There seems to be a clear pattern of the CB1 replying 07 to all
+        // query bytes ending in D (and 3?). Possibly this is a filler byte (like
+        // 47 and 87, there's a pattern here too) and those *D queries are
+        // only informative.
+        append(0x07);
+        break;
+
+      case 0x05:  // Sent after boot sequence, to request the first pattern row
+      case 0x85:  // Sent after 0D (turnaround) to request next pattern row
+        {
+          update_pattern(pattern_row++);
+          for (int i = 0; i < 25; i++) {
+            append(pattern[i]);
+          }
+          break;
+        }
+
+      case 0x09:  // Sent after receiving first row's pattern data
+      case 0x89:  // Sent after receiving subsequent rows' pattern data
+        append(0xf0);
+        break;
+
+      default:
+        append(defaultCb1Val);
+        break;
+    }
+  }
+};
+
+KH970Client khClient;
+
+void setup() {
+  pinMode(KH_CS, INPUT_PULLUP);
+  pinMode(KH_MOSI, OUTPUT);
+  pinMode(KH_SCK, OUTPUT);
+  Serial.begin(115200);
+  csi.begin();
+}
+
+void loop() {
+  if (millis() % 1000 < 500) TXLED1;
+  else TXLED0;
+  khClient.update();
 }
