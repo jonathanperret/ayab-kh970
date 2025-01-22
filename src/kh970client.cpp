@@ -222,18 +222,18 @@ void KH970Client::process(uint8_t bedVal) {
     // We get CD 6D BD 03 C3 when the K carriage crosses the right button.
 
   case 0x2d: // Sent when the left button is passed going to the right
-  case 0x7d: // Sent after 2D 6D/2D/1D, and after 0D 85 89 if new direction is
+  case 0x7d: // Sent after 2D 6D/ED/1D, and after 0D 85 89 if new direction is
              // rightwards.
-  case 0x13: // Sent after 2D 6D/2D/1D 7D
-  case 0xd3: // Sent after 2D 6D/2D/1D 7D 13
+  case 0x13: // Sent after 2D 6D/ED/1D 7D
+  case 0xd3: // Sent after 2D 6D/ED/1D 7D 13
 
   case 0xcd: // Sent when the right button is passed going to the left
-  case 0xbd: // Sent after CD 6D/2D/1D, and after CD 85 89 if new direction is
+  case 0xbd: // Sent after CD 6D/ED/1D, and after CD 85 89 if new direction is
              // leftwards.
-  case 0x03: // Sent after CD 6D/2D/1D BD
-  case 0x43: // Sent instead of 03 after CD 6D/2D/1D BD, sometimes, seen only
+  case 0x03: // Sent after CD 6D/ED/1D BD
+  case 0x43: // Sent instead of 03 after CD 6D/ED/1D BD, sometimes, seen only
              // with L carriage so far
-  case 0xc3: // Sent after CD 6D/2D/1D BD 03
+  case 0xc3: // Sent after CD 6D/ED/1D BD 03
 
   case 0x6d: // Sent after 2D/CD if the carriage is the K carriage
   case 0xed: // Sent after 2D/CD if the carriage is the L carriage
